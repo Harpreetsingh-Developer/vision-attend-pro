@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { mockStudents } from '@/data/mockData';
@@ -14,7 +14,7 @@ import { Search, Plus, Eye, Pencil, Trash2, Users } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function StudentsPage() {
-  const [students, setStudents] = useState<Student[]>(mockStudents);
+  const [students, setStudents] = useState<Student[]>([]);
   const [search, setSearch] = useState('');
   const [deptFilter, setDeptFilter] = useState<string>('all');
   const [yearFilter, setYearFilter] = useState<string>('all');
@@ -25,6 +25,29 @@ export default function StudentsPage() {
   const [form, setForm] = useState({ name: '', rollNo: '', email: '', department: 'CS' as Department, year: 1 as 1|2|3|4, section: 'A' });
 
   const perPage = 10;
+
+  // Load students from backend, fall back to local mock data
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch('http://localhost:4000/api/students');
+        if (!res.ok) throw new Error('Failed to load students');
+        const data = await res.json() as Student[];
+        if (!cancelled) {
+          setStudents(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setStudents(mockStudents);
+        }
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filtered = useMemo(() => {
     return students.filter(s => {
@@ -54,11 +77,23 @@ export default function StudentsPage() {
   const handleSave = () => {
     if (!form.name || !form.rollNo) { toast.error('Name and Roll No are required'); return; }
     if (editStudent) {
-      setStudents(prev => prev.map(s => s.id === editStudent.id ? { ...s, ...form } : s));
+      const updated: Student = { ...editStudent, ...form };
+      setStudents(prev => prev.map(s => s.id === editStudent.id ? updated : s));
+      // Fire and forget backend update
+      fetch(`http://localhost:4000/api/students/${editStudent.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated),
+      }).catch(() => {});
       toast.success('Student updated');
     } else {
       const newS: Student = { id: `stu_${Date.now()}`, ...form, enrolledAt: new Date().toISOString(), isActive: true, attendancePercentage: 0 };
       setStudents(prev => [newS, ...prev]);
+      fetch('http://localhost:4000/api/students', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newS),
+      }).catch(() => {});
       toast.success('Student added');
     }
     setModalOpen(false);
@@ -67,6 +102,9 @@ export default function StudentsPage() {
   const handleDelete = () => {
     if (deleteId) {
       setStudents(prev => prev.map(s => s.id === deleteId ? { ...s, isActive: false } : s));
+      fetch(`http://localhost:4000/api/students/${deleteId}`, {
+        method: 'DELETE',
+      }).catch(() => {});
       toast.success('Student removed');
       setDeleteId(null);
     }

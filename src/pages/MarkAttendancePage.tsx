@@ -1,17 +1,19 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { AppLayout } from '@/components/layout/AppLayout';
-import { mockStudents } from '@/data/mockData';
 import { getInitials } from '@/utils/helpers';
 import { Button } from '@/components/ui/button';
 import { Camera, Play, Square, Scan, Download } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAuth } from '@/context/AuthContext';
 
 interface MarkedStudent {
   id: string; name: string; rollNo: string; time: string; confidence: number;
 }
 
 export default function MarkAttendancePage() {
+  const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [streaming, setStreaming] = useState(false);
   const [sessionActive, setSessionActive] = useState(false);
   const [sessionId, setSessionId] = useState('');
@@ -51,43 +53,109 @@ export default function MarkAttendancePage() {
     return () => clearInterval(interval);
   }, [sessionActive, sessionStart]);
 
-  const startSession = () => {
+  const startSession = async () => {
     const id = `SESS-${Date.now().toString().slice(-6)}`;
     setSessionId(id);
     setSessionStart(new Date());
     setSessionActive(true);
     setMarkedStudents([]);
     setUnknownCount(0);
+    
+    // Create session on backend
+    try {
+      await fetch('http://localhost:4000/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: id,
+          markedBy: user?.id || 'system',
+          markedByName: user?.name || 'System',
+          department: user?.department || 'CS',
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to create session on backend:', err);
+    }
+    
     toast.success(`Session ${id} started`);
   };
 
-  const captureRecognise = () => {
+  const captureRecognise = async () => {
     if (!sessionActive) { toast.error('Start a session first'); return; }
+    if (!videoRef.current || !canvasRef.current) return;
+    
     setDetecting(true);
-    setTimeout(() => {
-      // Simulate: pick a random unmarked student
-      const unmarked = mockStudents.filter(s => s.isActive && !markedStudents.find(m => m.id === s.id));
-      if (unmarked.length === 0) {
-        // Simulate unknown face
+    
+    try {
+      // Capture frame from video
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      
+      ctx.drawImage(video, 0, 0);
+      const imageData = canvas.toDataURL('image/jpeg', 0.8);
+      
+      // Send to backend for face recognition
+      const response = await fetch('http://localhost:4000/api/attendance/mark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image: imageData,
+          sessionId,
+          markedBy: user?.id || 'system',
+          threshold: 0.6,
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Recognition failed');
+      }
+      
+      const result = await response.json();
+      
+      if (result.recognized && result.student) {
+        // Check if already marked
+        if (result.alreadyMarked) {
+          toast.info(`${result.student.name} already marked in this session`);
+        } else {
+          const entry: MarkedStudent = {
+            id: result.student.id,
+            name: result.student.name,
+            rollNo: result.student.rollNo,
+            time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            confidence: result.confidence,
+          };
+          setMarkedStudents(prev => [entry, ...prev]);
+          toast.success(`${result.student.name} marked present (${(result.confidence * 100).toFixed(0)}%)`);
+        }
+      } else {
+        // Unknown face
         setUnknownCount(c => c + 1);
         toast.warning('Unknown face detected');
-      } else {
-        const student = unmarked[Math.floor(Math.random() * unmarked.length)];
-        const confidence = +(0.85 + Math.random() * 0.15).toFixed(2);
-        const entry: MarkedStudent = {
-          id: student.id, name: student.name, rollNo: student.rollNo,
-          time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          confidence,
-        };
-        setMarkedStudents(prev => [entry, ...prev]);
-        toast.success(`${student.name} marked present (${(confidence * 100).toFixed(0)}%)`);
       }
+    } catch (error) {
+      console.error('Face recognition error:', error);
+      toast.error('Face recognition failed. Please try again.');
+    } finally {
       setDetecting(false);
-    }, 800);
+    }
   };
 
-  const endSession = () => {
+  const endSession = async () => {
     setSessionActive(false);
+    
+    // End session on backend
+    try {
+      await fetch(`http://localhost:4000/api/sessions/${sessionId}/end`, {
+        method: 'PUT',
+      });
+    } catch (err) {
+      console.error('Failed to end session on backend:', err);
+    }
+    
     toast.success(`Session ended. ${markedStudents.length} students marked.`);
   };
 
@@ -108,9 +176,13 @@ export default function MarkAttendancePage() {
               ) : (
                 <>
                   <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                  <canvas ref={canvasRef} className="hidden" />
                   {detecting && (
-                    <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="absolute inset-0 flex items-center justify-center bg-foreground/20">
                       <div className="w-48 h-48 border-2 border-success rounded-xl animate-pulse" />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <p className="text-white font-semibold">Detecting face...</p>
+                      </div>
                     </div>
                   )}
                   {sessionActive && (

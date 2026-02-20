@@ -1,15 +1,24 @@
+import { useState, useRef, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { mockStudents, mockAttendanceRecords } from '@/data/mockData';
 import { getInitials, getAttendanceBadgeColor, getStatusColor, formatDate, formatTime } from '@/utils/helpers';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { ArrowLeft, User } from 'lucide-react';
+import { ArrowLeft, User, Camera, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { toast } from 'sonner';
 
 export default function StudentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const student = mockStudents.find(s => s.id === id);
+  const [faceRegistered, setFaceRegistered] = useState(false);
+  const [registerDialogOpen, setRegisterDialogOpen] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [streaming, setStreaming] = useState(false);
+  const [registering, setRegistering] = useState(false);
 
   if (!student) {
     return (
@@ -27,6 +36,95 @@ export default function StudentDetailPage() {
   const totalRecords = records.length;
   const presentRecords = records.filter(r => r.status === 'present').length;
   const pct = totalRecords > 0 ? Math.round((presentRecords / totalRecords) * 100) : 0;
+
+  // Check if face is registered
+  useEffect(() => {
+    async function checkFaceRegistration() {
+      try {
+        const res = await fetch('http://localhost:4000/api/face-recognition/registered');
+        if (res.ok) {
+          const data = await res.json();
+          setFaceRegistered(data.student_ids?.includes(id) || false);
+        }
+      } catch (err) {
+        console.error('Failed to check face registration:', err);
+      }
+    }
+    if (id) checkFaceRegistration();
+  }, [id]);
+
+  // Camera functions
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'user', width: 640, height: 480 } 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setStreaming(true);
+      }
+    } catch (err) {
+      toast.error('Camera access denied');
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current?.srcObject) {
+      (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+      setStreaming(false);
+    }
+  };
+
+  const captureAndRegister = async () => {
+    if (!videoRef.current || !canvasRef.current || !id) return;
+    
+    setRegistering(true);
+    try {
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      
+      ctx.drawImage(video, 0, 0);
+      const imageData = canvas.toDataURL('image/jpeg', 0.9);
+      
+      const response = await fetch('http://localhost:4000/api/face-recognition/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentId: id, image: imageData }),
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || 'Registration failed');
+      }
+      
+      const result = await response.json();
+      if (result.success) {
+        setFaceRegistered(true);
+        setRegisterDialogOpen(false);
+        stopCamera();
+        toast.success('Face registered successfully!');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to register face');
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  useEffect(() => {
+    if (registerDialogOpen && !streaming) {
+      startCamera();
+    } else if (!registerDialogOpen && streaming) {
+      stopCamera();
+    }
+    return () => {
+      if (streaming) stopCamera();
+    };
+  }, [registerDialogOpen]);
 
   // Monthly data
   const monthMap: Record<string, { total: number; present: number }> = {};
@@ -113,7 +211,7 @@ export default function StudentDetailPage() {
             </div>
           </TabsContent>
           <TabsContent value="profile" className="mt-4">
-            <div className="bg-card rounded-xl border p-6 shadow-sm max-w-lg space-y-3">
+            <div className="bg-card rounded-xl border p-6 shadow-sm max-w-lg space-y-4">
               <div><span className="text-sm text-muted-foreground">Name:</span> <span className="font-medium ml-2">{student.name}</span></div>
               <div><span className="text-sm text-muted-foreground">Roll No:</span> <span className="font-medium ml-2">{student.rollNo}</span></div>
               <div><span className="text-sm text-muted-foreground">Email:</span> <span className="font-medium ml-2">{student.email}</span></div>
@@ -121,10 +219,68 @@ export default function StudentDetailPage() {
               <div><span className="text-sm text-muted-foreground">Year:</span> <span className="font-medium ml-2">{student.year}</span></div>
               <div><span className="text-sm text-muted-foreground">Section:</span> <span className="font-medium ml-2">{student.section}</span></div>
               <div><span className="text-sm text-muted-foreground">Enrolled:</span> <span className="font-medium ml-2">{formatDate(student.enrolledAt)}</span></div>
+              
+              <div className="pt-4 border-t">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <p className="font-medium">Face Recognition</p>
+                    <p className="text-sm text-muted-foreground">
+                      {faceRegistered ? 'Face registered for attendance' : 'No face registered yet'}
+                    </p>
+                  </div>
+                  {faceRegistered && <Check className="w-5 h-5 text-success" />}
+                </div>
+                <Button 
+                  onClick={() => setRegisterDialogOpen(true)} 
+                  variant={faceRegistered ? "outline" : "default"}
+                  className="w-full"
+                >
+                  <Camera className="w-4 h-4 mr-2" />
+                  {faceRegistered ? 'Re-register Face' : 'Register Face'}
+                </Button>
+              </div>
             </div>
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* Face Registration Dialog */}
+      <Dialog open={registerDialogOpen} onOpenChange={setRegisterDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Register Face for {student.name}</DialogTitle>
+            <DialogDescription>
+              Position your face in the center of the frame. Make sure you have good lighting and look directly at the camera.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="relative aspect-video bg-foreground/5 rounded-lg overflow-hidden">
+              {streaming ? (
+                <>
+                  <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                  <canvas ref={canvasRef} className="hidden" />
+                </>
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Camera className="w-12 h-12 text-muted-foreground/30" />
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={startCamera} variant="outline" className="flex-1" disabled={streaming}>
+                Start Camera
+              </Button>
+              <Button 
+                onClick={captureAndRegister} 
+                disabled={!streaming || registering}
+                className="flex-1"
+              >
+                {registering ? 'Registering...' : 'Capture & Register'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </AppLayout>
   );
 }

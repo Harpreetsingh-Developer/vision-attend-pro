@@ -25,6 +25,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const login = useCallback(async (email: string, password: string): Promise<boolean> => {
+    // Try backend first
+    try {
+      const res = await fetch('http://localhost:4000/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { user: User };
+        setUser(data.user);
+        localStorage.setItem('visioattend_user', JSON.stringify(data.user));
+        return true;
+      }
+    } catch {
+      // ignore and fall back to local mock auth
+    }
+
     const creds = validCredentials[email];
     if (creds && creds.password === password) {
       const foundUser = mockUsers.find(u => u.id === creds.userId)!;
